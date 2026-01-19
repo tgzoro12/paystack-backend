@@ -1,0 +1,19 @@
+{
+  "name": "paystack-backend",
+  "version": "1.0.0",
+  "description": "Paystack payment verification backend",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": "18.x"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "axios": "^1.6.0"
+  },
+  "keywords": ["paystack", "payment", "verification"],
+  "license": "MIT"
+}
