@@ -9,189 +9,119 @@ const bcrypt = require('bcryptjs');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Initialize services
-const supabase = createClient(
-    process.env.SUPABASE_URL,
-    process.env.SUPABASE_SERVICE_KEY
-);
-
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
 const resend = new Resend(process.env.RESEND_API_KEY);
-
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
 const JWT_SECRET = process.env.JWT_SECRET || 'mzone_secret_2024';
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://tgzoro12.github.io/mzone';
 
-// Middleware
-app.use(cors({
-    origin: ['https://tgzoro12.github.io', 'http://localhost:3000', 'http://127.0.0.1:5500'],
-    credentials: true
-}));
+// SUBSCRIPTION PLANS
+const PLANS = {
+    standard_monthly: {
+        name: 'Standard Monthly',
+        amount: 1600000, // ₦16,000 in kobo
+        duration: 30 // days
+    },
+    standard_yearly: {
+        name: 'Standard Yearly',
+        amount: 14500000, // ₦145,000 in kobo
+        duration: 365 // days
+    },
+    pro_monthly: {
+        name: 'Pro Monthly',
+        amount: 2200000, // ₦22,000 in kobo
+        duration: 30 // days
+    },
+    pro_yearly: {
+        name: 'Pro Yearly',
+        amount: 22000000, // ₦220,000 in kobo
+        duration: 365 // days
+    }
+};
+
+app.use(cors({ origin: '*', credentials: true }));
 app.use(express.json());
 
-// Helper: Generate 6-digit OTP
 function generateOTP() {
     return Math.floor(100000 + Math.random() * 900000).toString();
 }
 
-// Helper: Validate password (alphanumeric, min 10 chars)
 function validatePassword(password) {
-    if (password.length < 10) {
-        return { valid: false, message: 'Password must be at least 10 characters' };
-    }
-    if (!/[a-zA-Z]/.test(password)) {
-        return { valid: false, message: 'Password must contain letters' };
-    }
-    if (!/[0-9]/.test(password)) {
-        return { valid: false, message: 'Password must contain numbers' };
-    }
-    if (/^[a-zA-Z]+$/.test(password) || /^[0-9]+$/.test(password)) {
-        return { valid: false, message: 'Password must be alphanumeric (letters AND numbers)' };
-    }
+    if (!password || password.length < 10) return { valid: false, message: 'Password must be at least 10 characters' };
+    if (!/[a-zA-Z]/.test(password)) return { valid: false, message: 'Password must contain letters' };
+    if (!/[0-9]/.test(password)) return { valid: false, message: 'Password must contain numbers' };
     return { valid: true };
 }
 
-// Helper: Verify JWT token
 function verifyToken(req, res, next) {
     const token = req.headers.authorization?.split(' ')[1];
-    if (!token) {
-        return res.status(401).json({ success: false, message: 'No token provided' });
-    }
+    if (!token) return res.status(401).json({ success: false, message: 'No token provided' });
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
-        req.user = decoded;
+        req.user = jwt.verify(token, JWT_SECRET);
         next();
     } catch (error) {
         return res.status(401).json({ success: false, message: 'Invalid token' });
     }
 }
 
-// Health check
 app.get('/', (req, res) => {
-    res.json({
-        status: 'online',
-        message: 'MZone API Server Running',
-        timestamp: new Date().toISOString()
-    });
+    res.json({ status: 'online', message: 'MZone API Running', plans: Object.keys(PLANS) });
 });
 
-// ==================== AUTH ROUTES ====================
+// GET PLANS
+app.get('/plans', (req, res) => {
+    const planList = Object.entries(PLANS).map(([key, value]) => ({
+        id: key,
+        name: value.name,
+        amount: value.amount / 100, // Convert to Naira
+        duration: value.duration
+    }));
+    res.json({ success: true, plans: planList });
+});
 
 // REGISTER
 app.post('/auth/register', async (req, res) => {
     try {
         const { email, password, fullName } = req.body;
-
-        // Validate input
         if (!email || !password || !fullName) {
-            return res.status(400).json({ 
-                success: false, 
-                message: 'Email, password, and full name are required' 
-            });
+            return res.status(400).json({ success: false, message: 'All fields required' });
         }
-
-        // Validate email format
-        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-        if (!emailRegex.test(email)) {
-            return res.status(400).json({ 
-                success: false, 
-                message: 'Invalid email format' 
-            });
-        }
-
-        // Validate password
         const passwordCheck = validatePassword(password);
         if (!passwordCheck.valid) {
-            return res.status(400).json({ 
-                success: false, 
-                message: passwordCheck.message 
-            });
+            return res.status(400).json({ success: false, message: passwordCheck.message });
         }
-
-        // Check if user already exists
-        const { data: existingUser } = await supabase
-            .from('profiles')
-            .select('email')
-            .eq('email', email.toLowerCase())
-            .single();
-
-        if (existingUser) {
-            return res.status(400).json({ 
-                success: false, 
-                message: 'Email already registered' 
-            });
+        const { data: existing } = await supabase.from('profiles').select('email').eq('email', email.toLowerCase()).single();
+        if (existing) {
+            return res.status(400).json({ success: false, message: 'Email already registered' });
         }
-
-        // Hash password
         const hashedPassword = await bcrypt.hash(password, 12);
-
-        // Generate OTP
         const otp = generateOTP();
-        const otpExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
-
-        // Create user in database
-        const { data: newUser, error: insertError } = await supabase
-            .from('profiles')
-            .insert({
-                id: crypto.randomUUID(),
-                email: email.toLowerCase(),
-                full_name: fullName,
-                password_hash: hashedPassword,
-                email_verified: false,
-                otp_code: otp,
-                otp_expires_at: otpExpires.toISOString(),
-                is_subscribed: false,
-                created_at: new Date().toISOString()
-            })
-            .select()
-            .single();
-
-        if (insertError) {
-            console.error('Insert error:', insertError);
-            return res.status(500).json({ 
-                success: false, 
-                message: 'Failed to create account' 
-            });
+        const otpExpires = new Date(Date.now() + 10 * 60 * 1000);
+        const { error } = await supabase.from('profiles').insert({
+            email: email.toLowerCase(),
+            password_hash: hashedPassword,
+            full_name: fullName,
+            otp_code: otp,
+            otp_expires_at: otpExpires.toISOString(),
+            email_verified: false,
+            is_subscribed: false
+        });
+        if (error) {
+            console.error('DB Error:', error);
+            return res.status(500).json({ success: false, message: 'Failed to create account' });
         }
-
-        // Send OTP email
         try {
             await resend.emails.send({
                 from: 'MZone <onboarding@resend.dev>',
                 to: email,
-                subject: 'Verify your MZone account - OTP Code',
-                html: `
-                    <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 20px;">
-                        <h1 style="color: #6366f1; text-align: center;">🎬 MZone</h1>
-                        <h2 style="text-align: center;">Verify Your Email</h2>
-                        <p>Hello ${fullName},</p>
-                        <p>Your verification code is:</p>
-                        <div style="background: #f3f4f6; padding: 20px; text-align: center; border-radius: 10px; margin: 20px 0;">
-                            <span style="font-size: 32px; font-weight: bold; letter-spacing: 5px; color: #1a1a2e;">${otp}</span>
-                        </div>
-                        <p>This code expires in <strong>10 minutes</strong>.</p>
-                        <p>If you didn't create an account, please ignore this email.</p>
-                        <hr style="margin: 20px 0; border: none; border-top: 1px solid #e5e7eb;">
-                        <p style="color: #666; font-size: 12px; text-align: center;">© 2024 MZone Premium</p>
-                    </div>
-                `
+                subject: 'Your MZone Verification Code',
+                html: `<div style="font-family:Arial,sans-serif;max-width:500px;margin:0 auto;padding:20px;background:#0a0a0f;color:#fff;border-radius:10px;"><h1 style="color:#8b5cf6;text-align:center;">🎬 MZone</h1><p>Hello ${fullName},</p><p>Your verification code is:</p><div style="background:#1a1a2e;padding:20px;text-align:center;border-radius:10px;margin:20px 0;"><span style="font-size:32px;font-weight:bold;letter-spacing:5px;color:#8b5cf6;">${otp}</span></div><p>Code expires in 10 minutes.</p></div>`
             });
-        } catch (emailError) {
-            console.error('Email error:', emailError);
-            // Continue even if email fails - user can request new OTP
-        }
-
-        res.json({
-            success: true,
-            message: 'Account created! Check your email for verification code.',
-            email: email.toLowerCase()
-        });
-
+        } catch (e) { console.error('Email error:', e); }
+        res.json({ success: true, message: 'Account created! Check email for OTP.', email: email.toLowerCase() });
     } catch (error) {
         console.error('Register error:', error);
-        res.status(500).json({ 
-            success: false, 
-            message: 'Server error. Please try again.' 
-        });
+        res.status(500).json({ success: false, message: 'Server error' });
     }
 });
 
@@ -199,93 +129,18 @@ app.post('/auth/register', async (req, res) => {
 app.post('/auth/verify-otp', async (req, res) => {
     try {
         const { email, otp } = req.body;
-
-        if (!email || !otp) {
-            return res.status(400).json({ 
-                success: false, 
-                message: 'Email and OTP are required' 
-            });
-        }
-
-        // Get user
-        const { data: user, error } = await supabase
-            .from('profiles')
-            .select('*')
-            .eq('email', email.toLowerCase())
-            .single();
-
-        if (error || !user) {
-            return res.status(400).json({ 
-                success: false, 
-                message: 'User not found' 
-            });
-        }
-
-        // Check if already verified
-        if (user.email_verified) {
-            return res.status(400).json({ 
-                success: false, 
-                message: 'Email already verified. Please login.' 
-            });
-        }
-
-        // Check OTP
-        if (user.otp_code !== otp) {
-            return res.status(400).json({ 
-                success: false, 
-                message: 'Invalid OTP code' 
-            });
-        }
-
-        // Check if OTP expired
-        if (new Date(user.otp_expires_at) < new Date()) {
-            return res.status(400).json({ 
-                success: false, 
-                message: 'OTP expired. Please request a new one.' 
-            });
-        }
-
-        // Update user as verified
-        await supabase
-            .from('profiles')
-            .update({ 
-                email_verified: true,
-                otp_code: null,
-                otp_expires_at: null,
-                updated_at: new Date().toISOString()
-            })
-            .eq('email', email.toLowerCase());
-
-        // Generate JWT token
-        const token = jwt.sign(
-            { 
-                id: user.id, 
-                email: user.email,
-                fullName: user.full_name 
-            },
-            JWT_SECRET,
-            { expiresIn: '7d' }
-        );
-
-        res.json({
-            success: true,
-            message: 'Email verified successfully!',
-            token,
-            user: {
-                id: user.id,
-                email: user.email,
-                fullName: user.full_name,
-                emailVerified: true,
-                isSubscribed: user.is_subscribed
-            }
-        });
-
+        if (!email || !otp) return res.status(400).json({ success: false, message: 'Email and OTP required' });
+        const { data: user } = await supabase.from('profiles').select('*').eq('email', email.toLowerCase()).single();
+        if (!user) return res.status(400).json({ success: false, message: 'User not found' });
+        if (user.email_verified) return res.status(400).json({ success: false, message: 'Already verified' });
+        if (user.otp_code !== otp) return res.status(400).json({ success: false, message: 'Invalid OTP' });
+        if (new Date(user.otp_expires_at) < new Date()) return res.status(400).json({ success: false, message: 'OTP expired' });
+        await supabase.from('profiles').update({ email_verified: true, otp_code: null }).eq('email', email.toLowerCase());
+        const token = jwt.sign({ id: user.id, email: user.email, fullName: user.full_name }, JWT_SECRET, { expiresIn: '7d' });
+        res.json({ success: true, message: 'Email verified!', token, user: { id: user.id, email: user.email, fullName: user.full_name, emailVerified: true, isSubscribed: user.is_subscribed } });
     } catch (error) {
-        console.error('Verify OTP error:', error);
-        res.status(500).json({ 
-            success: false, 
-            message: 'Server error. Please try again.' 
-        });
+        console.error('Verify error:', error);
+        res.status(500).json({ success: false, message: 'Server error' });
     }
 });
 
@@ -293,76 +148,20 @@ app.post('/auth/verify-otp', async (req, res) => {
 app.post('/auth/resend-otp', async (req, res) => {
     try {
         const { email } = req.body;
-
-        if (!email) {
-            return res.status(400).json({ 
-                success: false, 
-                message: 'Email is required' 
-            });
-        }
-
-        // Get user
-        const { data: user, error } = await supabase
-            .from('profiles')
-            .select('*')
-            .eq('email', email.toLowerCase())
-            .single();
-
-        if (error || !user) {
-            return res.status(400).json({ 
-                success: false, 
-                message: 'User not found' 
-            });
-        }
-
-        if (user.email_verified) {
-            return res.status(400).json({ 
-                success: false, 
-                message: 'Email already verified' 
-            });
-        }
-
-        // Generate new OTP
+        const { data: user } = await supabase.from('profiles').select('*').eq('email', email.toLowerCase()).single();
+        if (!user) return res.status(400).json({ success: false, message: 'User not found' });
+        if (user.email_verified) return res.status(400).json({ success: false, message: 'Already verified' });
         const otp = generateOTP();
-        const otpExpires = new Date(Date.now() + 10 * 60 * 1000);
-
-        // Update user with new OTP
-        await supabase
-            .from('profiles')
-            .update({ 
-                otp_code: otp,
-                otp_expires_at: otpExpires.toISOString()
-            })
-            .eq('email', email.toLowerCase());
-
-        // Send email
+        await supabase.from('profiles').update({ otp_code: otp, otp_expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString() }).eq('email', email.toLowerCase());
         await resend.emails.send({
             from: 'MZone <onboarding@resend.dev>',
             to: email,
-            subject: 'New OTP Code - MZone',
-            html: `
-                <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 20px;">
-                    <h1 style="color: #6366f1; text-align: center;">🎬 MZone</h1>
-                    <h2 style="text-align: center;">Your New OTP Code</h2>
-                    <div style="background: #f3f4f6; padding: 20px; text-align: center; border-radius: 10px; margin: 20px 0;">
-                        <span style="font-size: 32px; font-weight: bold; letter-spacing: 5px; color: #1a1a2e;">${otp}</span>
-                    </div>
-                    <p>This code expires in <strong>10 minutes</strong>.</p>
-                </div>
-            `
+            subject: 'New MZone OTP Code',
+            html: `<div style="font-family:Arial;padding:20px;background:#0a0a0f;color:#fff;border-radius:10px;"><h1 style="color:#8b5cf6;">🎬 MZone</h1><p>Your new code:</p><div style="background:#1a1a2e;padding:20px;text-align:center;border-radius:10px;"><span style="font-size:32px;font-weight:bold;color:#8b5cf6;">${otp}</span></div></div>`
         });
-
-        res.json({
-            success: true,
-            message: 'New OTP sent to your email'
-        });
-
+        res.json({ success: true, message: 'New OTP sent!' });
     } catch (error) {
-        console.error('Resend OTP error:', error);
-        res.status(500).json({ 
-            success: false, 
-            message: 'Server error. Please try again.' 
-        });
+        res.status(500).json({ success: false, message: 'Server error' });
     }
 });
 
@@ -370,305 +169,131 @@ app.post('/auth/resend-otp', async (req, res) => {
 app.post('/auth/login', async (req, res) => {
     try {
         const { email, password } = req.body;
-
-        if (!email || !password) {
-            return res.status(400).json({ 
-                success: false, 
-                message: 'Email and password are required' 
-            });
-        }
-
-        // Get user
-        const { data: user, error } = await supabase
-            .from('profiles')
-            .select('*')
-            .eq('email', email.toLowerCase())
-            .single();
-
-        if (error || !user) {
-            return res.status(400).json({ 
-                success: false, 
-                message: 'Invalid email or password' 
-            });
-        }
-
-        // Check password
-        const validPassword = await bcrypt.compare(password, user.password_hash);
-        if (!validPassword) {
-            return res.status(400).json({ 
-                success: false, 
-                message: 'Invalid email or password' 
-            });
-        }
-
-        // Check if email verified
-        if (!user.email_verified) {
-            return res.status(400).json({ 
-                success: false, 
-                message: 'Please verify your email first',
-                needsVerification: true,
-                email: user.email
-            });
-        }
-
-        // Generate JWT token
-        const token = jwt.sign(
-            { 
-                id: user.id, 
-                email: user.email,
-                fullName: user.full_name 
-            },
-            JWT_SECRET,
-            { expiresIn: '7d' }
-        );
-
-        res.json({
-            success: true,
-            message: 'Login successful!',
-            token,
-            user: {
-                id: user.id,
-                email: user.email,
-                fullName: user.full_name,
-                emailVerified: user.email_verified,
-                isSubscribed: user.is_subscribed,
-                subscriptionExpires: user.subscription_expires_at
-            }
-        });
-
+        if (!email || !password) return res.status(400).json({ success: false, message: 'Email and password required' });
+        const { data: user } = await supabase.from('profiles').select('*').eq('email', email.toLowerCase()).single();
+        if (!user) return res.status(400).json({ success: false, message: 'Invalid credentials' });
+        const valid = await bcrypt.compare(password, user.password_hash);
+        if (!valid) return res.status(400).json({ success: false, message: 'Invalid credentials' });
+        if (!user.email_verified) return res.status(400).json({ success: false, message: 'Please verify email first', needsVerification: true, email: user.email });
+        const token = jwt.sign({ id: user.id, email: user.email, fullName: user.full_name }, JWT_SECRET, { expiresIn: '7d' });
+        res.json({ success: true, token, user: { id: user.id, email: user.email, fullName: user.full_name, emailVerified: true, isSubscribed: user.is_subscribed, subscriptionPlan: user.subscription_plan, subscriptionExpires: user.subscription_expires_at } });
     } catch (error) {
-        console.error('Login error:', error);
-        res.status(500).json({ 
-            success: false, 
-            message: 'Server error. Please try again.' 
-        });
+        res.status(500).json({ success: false, message: 'Server error' });
     }
 });
 
-// GET USER PROFILE (Protected)
+// GET ME
 app.get('/auth/me', verifyToken, async (req, res) => {
     try {
-        const { data: user, error } = await supabase
-            .from('profiles')
-            .select('*')
-            .eq('id', req.user.id)
-            .single();
-
-        if (error || !user) {
-            return res.status(404).json({ 
-                success: false, 
-                message: 'User not found' 
-            });
-        }
-
-        // Check if subscription expired
+        const { data: user } = await supabase.from('profiles').select('*').eq('id', req.user.id).single();
+        if (!user) return res.status(404).json({ success: false, message: 'User not found' });
         let isSubscribed = user.is_subscribed;
         if (user.subscription_expires_at && new Date(user.subscription_expires_at) < new Date()) {
             isSubscribed = false;
-            // Update database
-            await supabase
-                .from('profiles')
-                .update({ is_subscribed: false })
-                .eq('id', user.id);
+            await supabase.from('profiles').update({ is_subscribed: false }).eq('id', user.id);
         }
-
-        res.json({
-            success: true,
-            user: {
-                id: user.id,
-                email: user.email,
-                fullName: user.full_name,
-                emailVerified: user.email_verified,
-                isSubscribed: isSubscribed,
-                subscriptionExpires: user.subscription_expires_at
-            }
-        });
-
+        res.json({ success: true, user: { id: user.id, email: user.email, fullName: user.full_name, emailVerified: user.email_verified, isSubscribed, subscriptionPlan: user.subscription_plan, subscriptionExpires: user.subscription_expires_at } });
     } catch (error) {
-        console.error('Get profile error:', error);
-        res.status(500).json({ 
-            success: false, 
-            message: 'Server error' 
-        });
+        res.status(500).json({ success: false, message: 'Server error' });
     }
 });
 
-// ==================== PAYMENT ROUTES ====================
-
-// Initialize payment
+// INIT PAYMENT WITH PLAN
 app.post('/payment/initialize', verifyToken, async (req, res) => {
     try {
         const { plan } = req.body;
         
-        // Get user
-        const { data: user } = await supabase
-            .from('profiles')
-            .select('*')
-            .eq('id', req.user.id)
-            .single();
-
-        if (!user) {
-            return res.status(404).json({ 
-                success: false, 
-                message: 'User not found' 
-            });
-        }
-
-        if (!user.email_verified) {
+        // Validate plan
+        if (!plan || !PLANS[plan]) {
             return res.status(400).json({ 
                 success: false, 
-                message: 'Please verify your email first' 
+                message: 'Invalid plan. Available plans: ' + Object.keys(PLANS).join(', ') 
             });
         }
-
-        // Plan pricing (in kobo)
-        const plans = {
-            monthly: { amount: 1600000, name: 'Monthly Plan' },
-            yearly: { amount: 15360000, name: 'Yearly Plan' }
-        };
-
-        const selectedPlan = plans[plan] || plans.monthly;
-
-        const response = await axios.post(
-            'https://api.paystack.co/transaction/initialize',
-            {
-                email: user.email,
-                amount: selectedPlan.amount,
-                callback_url: `${FRONTEND_URL}/dashboard.html?payment=success`,
-                metadata: {
-                    user_id: user.id,
-                    plan: plan,
-                    custom_fields: [
-                        {
-                            display_name: "Customer Name",
-                            variable_name: "customer_name",
-                            value: user.full_name
-                        },
-                        {
-                            display_name: "Plan",
-                            variable_name: "plan",
-                            value: selectedPlan.name
-                        }
-                    ]
-                }
-            },
-            {
-                headers: {
-                    'Authorization': `Bearer ${PAYSTACK_SECRET_KEY}`,
-                    'Content-Type': 'application/json'
-                }
+        
+        const selectedPlan = PLANS[plan];
+        
+        const { data: user } = await supabase.from('profiles').select('*').eq('id', req.user.id).single();
+        if (!user || !user.email_verified) return res.status(400).json({ success: false, message: 'Verify email first' });
+        
+        const response = await axios.post('https://api.paystack.co/transaction/initialize', {
+            email: user.email,
+            amount: selectedPlan.amount,
+            callback_url: `${FRONTEND_URL}/dashboard.html?payment=success`,
+            metadata: { 
+                user_id: user.id, 
+                plan: plan,
+                plan_name: selectedPlan.name,
+                duration: selectedPlan.duration
             }
-        );
-
-        res.json({
-            success: true,
-            authorization_url: response.data.data.authorization_url,
-            reference: response.data.data.reference
+        }, { headers: { 'Authorization': `Bearer ${PAYSTACK_SECRET_KEY}`, 'Content-Type': 'application/json' } });
+        
+        res.json({ 
+            success: true, 
+            authorization_url: response.data.data.authorization_url, 
+            reference: response.data.data.reference,
+            plan: selectedPlan.name,
+            amount: selectedPlan.amount / 100
         });
-
     } catch (error) {
         console.error('Payment init error:', error.response?.data || error);
-        res.status(500).json({ 
-            success: false, 
-            message: 'Failed to initialize payment' 
-        });
+        res.status(500).json({ success: false, message: 'Payment init failed' });
     }
 });
 
-// Verify payment
+// VERIFY PAYMENT
 app.get('/payment/verify/:reference', verifyToken, async (req, res) => {
     try {
-        const { reference } = req.params;
-
-        const response = await axios.get(
-            `https://api.paystack.co/transaction/verify/${reference}`,
-            {
-                headers: {
-                    'Authorization': `Bearer ${PAYSTACK_SECRET_KEY}`
-                }
-            }
-        );
-
-        const data = response.data.data;
-
-        if (data.status === 'success') {
-            // Calculate subscription expiry (30 days for monthly, 365 for yearly)
-            const plan = data.metadata?.plan || 'monthly';
-            const days = plan === 'yearly' ? 365 : 30;
-            const expiresAt = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
-
-            // Update user subscription
-            await supabase
-                .from('profiles')
-                .update({
-                    is_subscribed: true,
-                    subscription_ref: reference,
-                    subscription_date: new Date().toISOString(),
-                    subscription_expires_at: expiresAt.toISOString(),
-                    updated_at: new Date().toISOString()
-                })
-                .eq('id', req.user.id);
-
-            res.json({
-                success: true,
-                message: 'Payment verified! Subscription activated.',
-                subscription: {
-                    active: true,
-                    expiresAt: expiresAt.toISOString(),
-                    plan: plan
-                }
-            });
+        const response = await axios.get(`https://api.paystack.co/transaction/verify/${req.params.reference}`, { headers: { 'Authorization': `Bearer ${PAYSTACK_SECRET_KEY}` } });
+        
+        if (response.data.data.status === 'success') {
+            const metadata = response.data.data.metadata;
+            const plan = metadata?.plan || 'standard_monthly';
+            const duration = PLANS[plan]?.duration || 30;
+            
+            const expires = new Date(Date.now() + duration * 24 * 60 * 60 * 1000);
+            
+            await supabase.from('profiles').update({ 
+                is_subscribed: true, 
+                subscription_ref: req.params.reference, 
+                subscription_plan: plan,
+                subscription_date: new Date().toISOString(), 
+                subscription_expires_at: expires.toISOString() 
+            }).eq('id', req.user.id);
+            
+            res.json({ success: true, message: 'Subscription activated!', plan: PLANS[plan]?.name });
         } else {
-            res.status(400).json({
-                success: false,
-                message: 'Payment not successful',
-                status: data.status
-            });
+            res.status(400).json({ success: false, message: 'Payment not successful' });
         }
-
     } catch (error) {
-        console.error('Verify payment error:', error);
-        res.status(500).json({ 
-            success: false, 
-            message: 'Failed to verify payment' 
-        });
+        res.status(500).json({ success: false, message: 'Verification failed' });
     }
 });
 
-// Paystack Webhook
+// WEBHOOK
 app.post('/payment/webhook', async (req, res) => {
     try {
-        const event = req.body;
-
-        if (event.event === 'charge.success') {
-            const data = event.data;
-            const userId = data.metadata?.user_id;
-
+        if (req.body.event === 'charge.success') {
+            const metadata = req.body.data.metadata;
+            const userId = metadata?.user_id;
+            const plan = metadata?.plan || 'standard_monthly';
+            const duration = PLANS[plan]?.duration || 30;
+            
             if (userId) {
-                const plan = data.metadata?.plan || 'monthly';
-                const days = plan === 'yearly' ? 365 : 30;
-                const expiresAt = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
-
-                await supabase
-                    .from('profiles')
-                    .update({
-                        is_subscribed: true,
-                        subscription_ref: data.reference,
-                        subscription_date: new Date().toISOString(),
-                        subscription_expires_at: expiresAt.toISOString()
-                    })
-                    .eq('id', userId);
+                const expires = new Date(Date.now() + duration * 24 * 60 * 60 * 1000);
+                await supabase.from('profiles').update({ 
+                    is_subscribed: true, 
+                    subscription_ref: req.body.data.reference, 
+                    subscription_plan: plan,
+                    subscription_date: new Date().toISOString(), 
+                    subscription_expires_at: expires.toISOString() 
+                }).eq('id', userId);
             }
         }
-
         res.sendStatus(200);
     } catch (error) {
-        console.error('Webhook error:', error);
         res.sendStatus(500);
     }
 });
 
-// Start server
-app.listen(PORT, () => {
-    console.log(`MZone API Server running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`MZone API running on port ${PORT}`));
