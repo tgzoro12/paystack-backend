@@ -9,242 +9,195 @@ const bcrypt = require('bcryptjs');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
+/* ================= ENV ================= */
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_KEY
+);
+
 const resend = new Resend(process.env.RESEND_API_KEY);
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
-const JWT_SECRET = process.env.JWT_SECRET || 'mzone_secret_2024';
-const FRONTEND_URL = process.env.FRONTEND_URL || 'https://tgzoro12.github.io/mzone';
+const JWT_SECRET = process.env.JWT_SECRET || 'mzone_secret_2025';
+const FRONTEND_URL = 'https://tgzoro12.github.io/mzone';
 
+/* ================= PLANS ================= */
 const PLANS = {
-    standard_monthly: { name: 'Standard Monthly', amount: 1600000, duration: 30 },
-    standard_yearly: { name: 'Standard Yearly', amount: 14500000, duration: 365 },
-    pro_monthly: { name: 'Pro Monthly', amount: 2200000, duration: 30 },
-    pro_yearly: { name: 'Pro Yearly', amount: 22000000, duration: 365 },
-    standard_monthly_discounted: { name: 'Standard Monthly (Discounted)', amount: 700000, duration: 30 },
-    standard_yearly_discounted: { name: 'Standard Yearly (Discounted)', amount: 7000000, duration: 365 },
-    pro_monthly_discounted: { name: 'Pro Monthly (Discounted)', amount: 1100000, duration: 30 },
-    pro_yearly_discounted: { name: 'Pro Yearly (Discounted)', amount: 11000000, duration: 365 }
+  standard_monthly: { name: 'Standard Monthly', amount: 1600000, duration: 30 },
+  standard_yearly: { name: 'Standard Yearly', amount: 14500000, duration: 365 },
+  pro_monthly: { name: 'Pro Monthly', amount: 2200000, duration: 30 },
+  pro_yearly: { name: 'Pro Yearly', amount: 22000000, duration: 365 }
 };
 
+/* ================= DISCOUNT CODES ================= */
 const DISCOUNT_CODES = {
-    'MZONE50': { name: 'MZONE50', percentage: 56, active: true },
-    'WELCOME50': { name: 'WELCOME50', percentage: 56, active: true },
-    'LAUNCH2025': { name: 'LAUNCH2025', percentage: 56, active: true },
-    'VIP2025': { name: 'VIP2025', percentage: 56, active: true }
+  MZONE50: { percent: 56, active: true },
+  VIP2025: { percent: 56, active: true },
+  LAUNCH2025: { percent: 56, active: true }
 };
 
-app.use(cors({ origin: '*', credentials: true }));
+/* ================= MIDDLEWARE ================= */
+app.use(cors({ origin: '*'}));
 app.use(express.json());
 
-function validatePassword(password) {
-    if (!password || password.length < 10) return { valid: false, message: 'Password must be at least 10 characters' };
-    if (!/[a-zA-Z]/.test(password)) return { valid: false, message: 'Password must contain letters' };
-    if (!/[0-9]/.test(password)) return { valid: false, message: 'Password must contain numbers' };
-    return { valid: true };
+function auth(req, res, next) {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.status(401).json({ success: false });
+
+  try {
+    req.user = jwt.verify(token, JWT_SECRET);
+    next();
+  } catch {
+    res.status(401).json({ success: false });
+  }
 }
 
-function verifyToken(req, res, next) {
-    const token = req.headers.authorization?.split(' ')[1];
-    if (!token) return res.status(401).json({ success: false, message: 'No token provided' });
-    try {
-        req.user = jwt.verify(token, JWT_SECRET);
-        next();
-    } catch (error) {
-        return res.status(401).json({ success: false, message: 'Invalid token' });
-    }
-}
-
+/* ================= BASIC ================= */
 app.get('/', (req, res) => {
-    res.json({ status: 'online', message: 'MZone API Running' });
+  res.json({ status: 'online', service: 'MZone API' });
 });
 
 app.get('/plans', (req, res) => {
-    const planList = Object.entries(PLANS).map(([key, value]) => ({
-        id: key, name: value.name, amount: value.amount / 100, duration: value.duration
-    }));
-    res.json({ success: true, plans: planList });
+  const list = Object.entries(PLANS).map(([id, p]) => ({
+    id,
+    name: p.name,
+    amount: p.amount / 100,
+    duration: p.duration
+  }));
+  res.json({ success: true, plans: list });
 });
 
+/* ================= AUTH ================= */
 app.post('/auth/register', async (req, res) => {
-    try {
-        const { email, password, fullName } = req.body;
-        if (!email || !password || !fullName) {
-            return res.status(400).json({ success: false, message: 'All fields required' });
-        }
-        const passwordCheck = validatePassword(password);
-        if (!passwordCheck.valid) {
-            return res.status(400).json({ success: false, message: passwordCheck.message });
-        }
-        const { data: existing } = await supabase.from('profiles').select('email').eq('email', email.toLowerCase()).single();
-        if (existing) {
-            return res.status(400).json({ success: false, message: 'Email already registered' });
-        }
-        const hashedPassword = await bcrypt.hash(password, 12);
-        
-        const { data: newUser, error } = await supabase.from('profiles').insert({
-            email: email.toLowerCase(),
-            password_hash: hashedPassword,
-            full_name: fullName,
-            email_verified: true,
-            is_subscribed: false
-        }).select().single();
-        
-        if (error) {
-            console.error('DB Error:', error);
-            return res.status(500).json({ success: false, message: 'Failed to create account' });
-        }
-        
-        try {
-            await resend.emails.send({
-                from: 'MZone <onboarding@resend.dev>',
-                to: email,
-                subject: 'Welcome to MZone!',
-                html: `<div style="font-family:Arial;max-width:500px;margin:0 auto;padding:20px;background:#0a0a0f;color:#fff;border-radius:10px;"><h1 style="color:#8b5cf6;text-align:center;">🎬 MZone</h1><p>Hello ${fullName},</p><p>Welcome to MZone! Your account has been created successfully.</p></div>`
-            });
-        } catch (e) { console.error('Email error:', e); }
-        
-        const token = jwt.sign({ id: newUser.id, email: newUser.email, fullName: newUser.full_name }, JWT_SECRET, { expiresIn: '7d' });
-        
-        res.json({ 
-            success: true, 
-            message: 'Account created!', 
-            token,
-            user: { id: newUser.id, email: newUser.email, fullName: newUser.full_name, isSubscribed: false }
-        });
-    } catch (error) {
-        console.error('Register error:', error);
-        res.status(500).json({ success: false, message: 'Server error' });
-    }
+  const { email, password, fullName } = req.body;
+  if (!email || !password || !fullName)
+    return res.status(400).json({ success: false });
+
+  const hash = await bcrypt.hash(password, 12);
+
+  const { error } = await supabase.from('profiles').insert({
+    email: email.toLowerCase(),
+    password_hash: hash,
+    full_name: fullName,
+    is_subscribed: false
+  });
+
+  if (error) return res.status(500).json({ success: false });
+
+  try {
+    await resend.emails.send({
+      from: 'MZone <onboarding@resend.dev>',
+      to: email,
+      subject: 'Welcome to MZone',
+      html: `<h2>Welcome ${fullName}</h2>`
+    });
+  } catch {}
+
+  res.json({ success: true });
 });
 
 app.post('/auth/login', async (req, res) => {
-    try {
-        const { email, password } = req.body;
-        if (!email || !password) return res.status(400).json({ success: false, message: 'Email and password required' });
-        const { data: user } = await supabase.from('profiles').select('*').eq('email', email.toLowerCase()).single();
-        if (!user) return res.status(400).json({ success: false, message: 'Invalid credentials' });
-        const valid = await bcrypt.compare(password, user.password_hash);
-        if (!valid) return res.status(400).json({ success: false, message: 'Invalid credentials' });
-        
-        const token = jwt.sign({ id: user.id, email: user.email, fullName: user.full_name }, JWT_SECRET, { expiresIn: '7d' });
-        res.json({ 
-            success: true, 
-            token, 
-            user: { id: user.id, email: user.email, fullName: user.full_name, isSubscribed: user.is_subscribed, subscriptionPlan: user.subscription_plan, subscriptionExpires: user.subscription_expires_at }
-        });
-    } catch (error) {
-        res.status(500).json({ success: false, message: 'Server error' });
-    }
+  const { email, password } = req.body;
+
+  const { data: user } = await supabase
+    .from('profiles')
+    .select('*')
+    .eq('email', email.toLowerCase())
+    .single();
+
+  if (!user) return res.status(400).json({ success: false });
+
+  const ok = await bcrypt.compare(password, user.password_hash);
+  if (!ok) return res.status(400).json({ success: false });
+
+  const token = jwt.sign(
+    { id: user.id, email: user.email },
+    JWT_SECRET,
+    { expiresIn: '7d' }
+  );
+
+  res.json({
+    success: true,
+    token,
+    user
+  });
 });
 
-app.get('/auth/me', verifyToken, async (req, res) => {
-    try {
-        const { data: user } = await supabase.from('profiles').select('*').eq('id', req.user.id).single();
-        if (!user) return res.status(404).json({ success: false, message: 'User not found' });
-        let isSubscribed = user.is_subscribed;
-        if (user.subscription_expires_at && new Date(user.subscription_expires_at) < new Date()) {
-            isSubscribed = false;
-            await supabase.from('profiles').update({ is_subscribed: false }).eq('id', user.id);
-        }
-        res.json({ success: true, user: { id: user.id, email: user.email, fullName: user.full_name, isSubscribed, subscriptionPlan: user.subscription_plan, subscriptionExpires: user.subscription_expires_at } });
-    } catch (error) {
-        res.status(500).json({ success: false, message: 'Server error' });
+/* ================= PAYMENT INIT ================= */
+app.post('/payment/initialize', auth, async (req, res) => {
+  const { plan, discountCode } = req.body;
+  if (!PLANS[plan]) return res.status(400).json({ success: false });
+
+  let amount = PLANS[plan].amount;
+  let appliedDiscount = null;
+
+  if (discountCode) {
+    const code = discountCode.toUpperCase();
+    if (DISCOUNT_CODES[code]?.active) {
+      amount = Math.floor(
+        amount * (100 - DISCOUNT_CODES[code].percent) / 100
+      );
+      appliedDiscount = code;
     }
+  }
+
+  const { data: user } = await supabase
+    .from('profiles')
+    .select('*')
+    .eq('id', req.user.id)
+    .single();
+
+  const response = await axios.post(
+    'https://api.paystack.co/transaction/initialize',
+    {
+      email: user.email,
+      amount,
+      callback_url: `${FRONTEND_URL}/dashboard.html`,
+      metadata: {
+        user_id: user.id,
+        plan,
+        duration: PLANS[plan].duration,
+        discount_code: appliedDiscount
+      }
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`
+      }
+    }
+  );
+
+  res.json({
+    success: true,
+    url: response.data.data.authorization_url
+  });
 });
 
-app.post('/payment/initialize', verifyToken, async (req, res) => {
-    try {
-        const { plan, discountCode } = req.body;
-        
-        if (!plan || !PLANS[plan]) {
-            return res.status(400).json({ success: false, message: 'Invalid plan' });
-        }
-        
-        let validDiscount = null;
-        if (discountCode) {
-            const code = discountCode.toUpperCase();
-            if (DISCOUNT_CODES[code] && DISCOUNT_CODES[code].active) {
-                validDiscount = DISCOUNT_CODES[code];
-            }
-        }
-        
-        const selectedPlan = PLANS[plan];
-        const { data: user } = await supabase.from('profiles').select('*').eq('id', req.user.id).single();
-        if (!user) return res.status(400).json({ success: false, message: 'User not found' });
-        
-        const response = await axios.post('https://api.paystack.co/transaction/initialize', {
-            email: user.email,
-            amount: selectedPlan.amount,
-            callback_url: `${FRONTEND_URL}/dashboard.html?payment=success`,
-            metadata: { 
-                user_id: user.id, 
-                plan: plan, 
-                duration: selectedPlan.duration,
-                discount_code: validDiscount ? validDiscount.name : null,
-                discount_percentage: validDiscount ? validDiscount.percentage : 0
-            }
-        }, { headers: { 'Authorization': `Bearer ${PAYSTACK_SECRET_KEY}`, 'Content-Type': 'application/json' } });
-        
-        res.json({ success: true, authorization_url: response.data.data.authorization_url, reference: response.data.data.reference });
-    } catch (error) {
-        console.error('Payment init error:', error.response?.data || error);
-        res.status(500).json({ success: false, message: 'Payment init failed' });
-    }
+/* ================= VERIFY ================= */
+app.get('/payment/verify/:ref', auth, async (req, res) => {
+  const r = await axios.get(
+    `https://api.paystack.co/transaction/verify/${req.params.ref}`,
+    { headers: { Authorization: `Bearer ${PAYSTACK_SECRET_KEY}` } }
+  );
+
+  if (r.data.data.status !== 'success')
+    return res.status(400).json({ success: false });
+
+  const meta = r.data.data.metadata;
+  const expires = new Date(
+    Date.now() + meta.duration * 86400000
+  );
+
+  await supabase.from('profiles').update({
+    is_subscribed: true,
+    subscription_plan: meta.plan,
+    subscription_expires_at: expires.toISOString(),
+    discount_code_used: meta.discount_code
+  }).eq('id', meta.user_id);
+
+  res.json({ success: true });
 });
 
-app.get('/payment/verify/:reference', verifyToken, async (req, res) => {
-    try {
-        const response = await axios.get(`https://api.paystack.co/transaction/verify/${req.params.reference}`, { headers: { 'Authorization': `Bearer ${PAYSTACK_SECRET_KEY}` } });
-        if (response.data.data.status === 'success') {
-            const metadata = response.data.data.metadata;
-            const plan = metadata?.plan || 'standard_monthly';
-            const duration = PLANS[plan]?.duration || 30;
-            const discountCode = metadata?.discount_code || null;
-            const expires = new Date(Date.now() + duration * 24 * 60 * 60 * 1000);
-            
-            await supabase.from('profiles').update({ 
-                is_subscribed: true, 
-                subscription_ref: req.params.reference, 
-                subscription_plan: plan,
-                subscription_date: new Date().toISOString(), 
-                subscription_expires_at: expires.toISOString(),
-                discount_code_used: discountCode
-            }).eq('id', req.user.id);
-            
-            res.json({ success: true, message: 'Subscription activated!' });
-        } else {
-            res.status(400).json({ success: false, message: 'Payment not successful' });
-        }
-    } catch (error) {
-        res.status(500).json({ success: false, message: 'Verification failed' });
-    }
-});
-
-app.post('/payment/webhook', async (req, res) => {
-    try {
-        if (req.body.event === 'charge.success') {
-            const metadata = req.body.data.metadata;
-            const userId = metadata?.user_id;
-            const plan = metadata?.plan || 'standard_monthly';
-            const duration = PLANS[plan]?.duration || 30;
-            const discountCode = metadata?.discount_code || null;
-            
-            if (userId) {
-                const expires = new Date(Date.now() + duration * 24 * 60 * 60 * 1000);
-                await supabase.from('profiles').update({ 
-                    is_subscribed: true, 
-                    subscription_ref: req.body.data.reference, 
-                    subscription_plan: plan,
-                    subscription_date: new Date().toISOString(), 
-                    subscription_expires_at: expires.toISOString(),
-                    discount_code_used: discountCode
-                }).eq('id', userId);
-            }
-        }
-        res.sendStatus(200);
-    } catch (error) {
-        res.sendStatus(500);
-    }
-});
-
-app.listen(PORT, () => console.log(`MZone API running on port ${PORT}`));
+/* ================= START ================= */
+app.listen(PORT, () =>
+  console.log('MZone backend running on', PORT)
+);
