@@ -19,7 +19,18 @@ const PLANS = {
     standard_monthly: { name: 'Standard Monthly', amount: 1600000, duration: 30 },
     standard_yearly: { name: 'Standard Yearly', amount: 14500000, duration: 365 },
     pro_monthly: { name: 'Pro Monthly', amount: 2200000, duration: 30 },
-    pro_yearly: { name: 'Pro Yearly', amount: 22000000, duration: 365 }
+    pro_yearly: { name: 'Pro Yearly', amount: 22000000, duration: 365 },
+    standard_monthly_discounted: { name: 'Standard Monthly (Discounted)', amount: 700000, duration: 30 },
+    standard_yearly_discounted: { name: 'Standard Yearly (Discounted)', amount: 7000000, duration: 365 },
+    pro_monthly_discounted: { name: 'Pro Monthly (Discounted)', amount: 1100000, duration: 30 },
+    pro_yearly_discounted: { name: 'Pro Yearly (Discounted)', amount: 11000000, duration: 365 }
+};
+
+const DISCOUNT_CODES = {
+    'MZONE50': { name: 'MZONE50', percentage: 56, active: true },
+    'WELCOME50': { name: 'WELCOME50', percentage: 56, active: true },
+    'LAUNCH2025': { name: 'LAUNCH2025', percentage: 56, active: true },
+    'VIP2025': { name: 'VIP2025', percentage: 56, active: true }
 };
 
 app.use(cors({ origin: '*', credentials: true }));
@@ -143,10 +154,20 @@ app.get('/auth/me', verifyToken, async (req, res) => {
 
 app.post('/payment/initialize', verifyToken, async (req, res) => {
     try {
-        const { plan } = req.body;
+        const { plan, discountCode } = req.body;
+        
         if (!plan || !PLANS[plan]) {
             return res.status(400).json({ success: false, message: 'Invalid plan' });
         }
+        
+        let validDiscount = null;
+        if (discountCode) {
+            const code = discountCode.toUpperCase();
+            if (DISCOUNT_CODES[code] && DISCOUNT_CODES[code].active) {
+                validDiscount = DISCOUNT_CODES[code];
+            }
+        }
+        
         const selectedPlan = PLANS[plan];
         const { data: user } = await supabase.from('profiles').select('*').eq('id', req.user.id).single();
         if (!user) return res.status(400).json({ success: false, message: 'User not found' });
@@ -155,7 +176,13 @@ app.post('/payment/initialize', verifyToken, async (req, res) => {
             email: user.email,
             amount: selectedPlan.amount,
             callback_url: `${FRONTEND_URL}/dashboard.html?payment=success`,
-            metadata: { user_id: user.id, plan: plan, duration: selectedPlan.duration }
+            metadata: { 
+                user_id: user.id, 
+                plan: plan, 
+                duration: selectedPlan.duration,
+                discount_code: validDiscount ? validDiscount.name : null,
+                discount_percentage: validDiscount ? validDiscount.percentage : 0
+            }
         }, { headers: { 'Authorization': `Bearer ${PAYSTACK_SECRET_KEY}`, 'Content-Type': 'application/json' } });
         
         res.json({ success: true, authorization_url: response.data.data.authorization_url, reference: response.data.data.reference });
@@ -172,6 +199,7 @@ app.get('/payment/verify/:reference', verifyToken, async (req, res) => {
             const metadata = response.data.data.metadata;
             const plan = metadata?.plan || 'standard_monthly';
             const duration = PLANS[plan]?.duration || 30;
+            const discountCode = metadata?.discount_code || null;
             const expires = new Date(Date.now() + duration * 24 * 60 * 60 * 1000);
             
             await supabase.from('profiles').update({ 
@@ -179,7 +207,8 @@ app.get('/payment/verify/:reference', verifyToken, async (req, res) => {
                 subscription_ref: req.params.reference, 
                 subscription_plan: plan,
                 subscription_date: new Date().toISOString(), 
-                subscription_expires_at: expires.toISOString() 
+                subscription_expires_at: expires.toISOString(),
+                discount_code_used: discountCode
             }).eq('id', req.user.id);
             
             res.json({ success: true, message: 'Subscription activated!' });
@@ -198,6 +227,7 @@ app.post('/payment/webhook', async (req, res) => {
             const userId = metadata?.user_id;
             const plan = metadata?.plan || 'standard_monthly';
             const duration = PLANS[plan]?.duration || 30;
+            const discountCode = metadata?.discount_code || null;
             
             if (userId) {
                 const expires = new Date(Date.now() + duration * 24 * 60 * 60 * 1000);
@@ -206,7 +236,8 @@ app.post('/payment/webhook', async (req, res) => {
                     subscription_ref: req.body.data.reference, 
                     subscription_plan: plan,
                     subscription_date: new Date().toISOString(), 
-                    subscription_expires_at: expires.toISOString() 
+                    subscription_expires_at: expires.toISOString(),
+                    discount_code_used: discountCode
                 }).eq('id', userId);
             }
         }
